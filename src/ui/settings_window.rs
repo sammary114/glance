@@ -1069,6 +1069,8 @@ enum Field {
     OverlayShow,
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
+    /// The Apple Music region preferred for searching tracks.
+    AppleStorefront,
     /// The station's (see `settings::StationSettings`): the folders the files come lately are not listed from (all
     /// listed again: under Recent files' group, see `Ui::recent_rows`), how long what is not pinned stays, files kept
     /// as a copy too, and what is dragged off it taken off. (What is copied kept, and the files come lately listed, are
@@ -2342,6 +2344,7 @@ impl Ui {
             }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
+                rows.push(Row::Choice(Field::AppleStorefront));
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
                 // (Only where NetEase is installed.)
                 if self.netease.is_some() {
@@ -3139,6 +3142,26 @@ impl Ui {
                 };
                 (pick(lang, "音乐来源", "Music from"), options, chosen)
             }
+            Field::AppleStorefront => (
+                pick(lang, "Apple Music 区域", "Apple Music region"),
+                vec![
+                    s("自动（根据曲目语言）", "Automatic (from track)"),
+                    s("中国大陆 (CN)", "China (CN)"),
+                    s("美国 (US)", "United States (US)"),
+                    s("日本 (JP)", "Japan (JP)"),
+                    s("香港 (HK)", "Hong Kong (HK)"),
+                    s("台湾 (TW)", "Taiwan (TW)"),
+                ],
+                match settings.apple_storefront.as_deref() {
+                    None => Some(0),
+                    Some("cn") => Some(1),
+                    Some("us") => Some(2),
+                    Some("jp") => Some(3),
+                    Some("hk") => Some(4),
+                    Some("tw") => Some(5),
+                    _ => Some(0),
+                },
+            ),
             Field::OverlayShow => (
                 pick(lang, "显示悬浮窗", "Show the overlay"),
                 vec![s("关闭", "Off"), s("游戏时", "While playing"), s("始终", "Always")],
@@ -3222,6 +3245,16 @@ impl Ui {
             Field::OverlayShow => settings.overlay.show(OVERLAY_SHOWN[index]),
             Field::MusicSource => {
                 settings.music_source = index.checked_sub(1).and_then(|at| self.sources.get(at)).map(|(id, name)| crate::settings::MusicSource { id: id.clone(), name: name.clone() });
+            }
+            Field::AppleStorefront => {
+                settings.apple_storefront = match index {
+                    1 => Some("cn".into()),
+                    2 => Some("us".into()),
+                    3 => Some("jp".into()),
+                    4 => Some("hk".into()),
+                    5 => Some("tw".into()),
+                    _ => None,
+                };
             }
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
@@ -3361,6 +3394,11 @@ impl Ui {
                 self.lang,
                 "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器。时间与媒体不受此项影响",
                 "Automatic follows music players only. For music in a web page, choose the browser. The time and media are not affected",
+            )),
+            Field::AppleStorefront => Some(pick(
+                self.lang,
+                "检索 Apple Music 曲库时的首选区域。所选区域未找到时，会自动尝试其他区域",
+                "The Apple Music region preferred when searching its catalog. Other regions are tried if none is found",
             )),
             Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
             Field::OverFullscreen => Some(pick(

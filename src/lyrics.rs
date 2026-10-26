@@ -159,6 +159,28 @@ struct Said {
 /// NetEase number its player gave, NetEase's own (the lyrics it shows itself); played in QQ Music, its own; then
 /// LRCLIB's (found by title, artist, album and length, more surely the track's own than a search's), then NetEase's,
 /// then QQ Music's (a track QQ Music alone has the lyrics of, played there, showed none).
+/// What NetEase Cloud Music has for its track `id`, and of the AMLL collection: timed word by word first (with NetEase's
+/// translation where none is in the collection, and NetEase's credits); else as its player shows them.
+fn netease_by_number(id: u64) -> Option<Vec<Line>> {
+    let (worded, theirs) = std::thread::scope(|scope| {
+        let theirs = scope.spawn(|| netease_and_credits(id));
+        (amll(id).ok().flatten(), theirs.join().ok().and_then(Result::ok))
+    });
+    let (theirs, credits) = match theirs {
+        Some((lines, credits)) => (lines, credits),
+        None => (None, Vec::new()),
+    };
+    match (worded, theirs) {
+        (Some(mut lines), theirs) => {
+            if let Some(theirs) = theirs.filter(|_| lines.iter().all(|line| line.translation.is_none())) {
+                translated(&mut lines, &theirs);
+            }
+            Some(with_credits(lines, &credits))
+        }
+        (None, theirs) => theirs,
+    }
+}
+
 fn find(track: &Track) -> Said {
     use std::sync::atomic::{AtomicBool, Ordering};
     let sure = AtomicBool::new(true);
@@ -169,27 +191,7 @@ fn find(track: &Track) -> Said {
             None
         })
     };
-    let by_number = |id: u64| {
-        let (worded, theirs) = std::thread::scope(|scope| {
-            let theirs = scope.spawn(|| netease_and_credits(id));
-            (answered(amll(id)), theirs.join().expect("NetEase asked"))
-        });
-        let (theirs, credits) = match theirs {
-            Ok((lines, credits)) => (lines, credits),
-            Err(Unreached) => (answered(Err(Unreached)), Vec::new()),
-        };
-        match (worded, theirs) {
-            // Timed word by word elsewhere: with NetEase's translation where they have none, and NetEase's lines of
-            // who wrote and made the song (they have none: NetEase showed those lines, the lyrics nothing).
-            (Some(mut lines), theirs) => {
-                if let Some(theirs) = theirs.filter(|_| lines.iter().all(|line| line.translation.is_none())) {
-                    translated(&mut lines, &theirs);
-                }
-                Some(with_credits(lines, &credits))
-            }
-            (None, theirs) => theirs,
-        }
-    };
+    let by_number = |id: u64| netease_by_number(id);
     // (Each on a thread of its own, left to end on its own where its answer is not waited for.)
     let asked = |source: fn(&Track) -> Answer<Vec<Line>>| {
         let (told, answer) = std::sync::mpsc::channel();
@@ -457,18 +459,38 @@ static WEBPLAY: Mutex<Option<(String, u64)>> = Mutex::new(None);
 /// only the token has run out (the script is the same one, its token refreshed within it).
 static SCRIPT: Mutex<Option<String>> = Mutex::new(None);
 
-/// The storefront of Apple's catalog most likely to name `track` as its player does (its native land:
-/// Japan for Japanese kana, China for Chinese hanzi, America for Western Latin and the like), and the two
-/// asked only where that first has no match.
+/// The storefront of Apple's catalog most likely to name `track` as its player does: where configured in
+/// settings, that storefront first; else as picked from the track's script (Japan for Japanese kana, China for
+/// Chinese hanzi, America for Western Latin and the like); the others asked only where that first has no match.
 fn apple_storefronts(track: &Track) -> [(&'static str, &'static str); 3] {
-    let text = format!("{} {}", track.title, track.artist);
-    if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}')) {
-        [("jp", "ja"), ("cn", "zh-Hans"), ("us", "en-US")]
-    } else if text.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}')) {
-        [("cn", "zh-Hans"), ("us", "en-US"), ("jp", "ja")]
-    } else {
-        [("us", "en-US"), ("cn", "zh-Hans"), ("jp", "ja")]
+    let chosen = crate::APP.get().and_then(|app| app.settings.lock().ok()).and_then(|s| s.apple_storefront.clone());
+    match chosen.as_deref() {
+        Some("cn") => [("cn", "zh-Hans"), ("us", "en-US"), ("jp", "ja")],
+        Some("us") => [("us", "en-US"), ("cn", "zh-Hans"), ("jp", "ja")],
+        Some("jp") => [("jp", "ja"), ("cn", "zh-Hans"), ("us", "en-US")],
+        Some("hk") => [("hk", "zh-Hant-HK"), ("cn", "zh-Hans"), ("tw", "zh-Hant-TW")],
+        Some("tw") => [("tw", "zh-Hant-TW"), ("cn", "zh-Hans"), ("hk", "zh-Hant-HK")],
+        _ => {
+            let text = format!("{} {}", track.title, track.artist);
+            if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}')) {
+                [("jp", "ja"), ("cn", "zh-Hans"), ("us", "en-US")]
+            } else if text.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}')) {
+                [("cn", "zh-Hans"), ("us", "en-US"), ("jp", "ja")]
+            } else {
+                [("us", "en-US"), ("cn", "zh-Hans"), ("jp", "ja")]
+            }
+        }
     }
+}
+
+/// A song of Apple Music's catalog: its identifier, duration (seconds), and its title and artist as named
+/// in that store's language.
+#[derive(Clone, Debug)]
+struct AppleSong {
+    id: String,
+    duration: f64,
+    title: String,
+    artist: String,
 }
 
 /// A title with its trailing remarks (" (feat. …)", " - Single", " (Remastered)") cut off.
@@ -489,13 +511,13 @@ fn title_bare(title: &str) -> &str {
 fn apple_music(track: &Track) -> Answer<Vec<Line>> {
     let [first, second, third] = apple_storefronts(track);
     // (The store of the track's script first: most tracks match where they were written; the others spared.)
-    let (id, unreached_first) = match apple_song(track, first.0, first.1) {
-        Ok(Some((id, _))) => (Some(id), false),
+    let (song, unreached_first) = match apple_song(track, first.0, first.1) {
+        Ok(Some(song)) => (Some(song), false),
         Ok(None) => (None, false),
         Err(Unreached) => (None, true),
     };
-    let id = match id {
-        Some(id) => id,
+    let song = match song {
+        Some(song) => song,
         None => {
             // (The other two stores together: each waits only for itself.)
             let (two, three) = std::thread::scope(|scope| {
@@ -504,7 +526,7 @@ fn apple_music(track: &Track) -> Answer<Vec<Line>> {
                 (two, three.join().unwrap_or(Err(Unreached)))
             });
             let length = f64::from(track.seconds);
-            let mut candidates: Vec<(String, f64)> = Vec::new();
+            let mut candidates: Vec<AppleSong> = Vec::new();
             let mut unreached = unreached_first;
             for answer in [two, three] {
                 match answer {
@@ -513,34 +535,45 @@ fn apple_music(track: &Track) -> Answer<Vec<Line>> {
                     Err(Unreached) => unreached = true,
                 }
             }
-            match candidates.into_iter().min_by(|a, b| (a.1 - length).abs().total_cmp(&(b.1 - length).abs())) {
-                Some((id, _)) => id,
+            match candidates.into_iter().min_by(|a, b| (a.duration - length).abs().total_cmp(&(b.duration - length).abs())) {
+                Some(song) => song,
                 None => return if unreached { Err(Unreached) } else { Ok(None) },
             }
         }
     };
     // (PaxSenix keeps what was asked for before in its cache, answered quickly; else asked of its lyrics service.
     // Where its service is busy, one more attempt after a moment: a transient state, quickly past.)
-    let xml = match fetched(&format!("https://lyrics.paxsenix.org/apple-music/cache/{id}")) {
-        Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
-        _ => {
-            let fetch_lyrics = || fetched_json(&format!("https://lyrics.paxsenix.org/apple-music/lyrics?id={id}&ttml=true"));
-            let said = match fetch_lyrics()? {
-                Some(said) if said["error"].as_bool() == Some(true) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1_500));
-                    match fetch_lyrics()? {
-                        Some(said) if said["error"].as_bool() == Some(true) => return Err(Unreached),
-                        other => other,
-                    }
-                }
-                other => other,
-            };
-            said.and_then(|said| said["content"].as_str().map(str::to_string))
+    let fetch_lyrics = || fetched_json(&format!("https://lyrics.paxsenix.org/apple-music/lyrics?id={}&ttml=true", song.id));
+    let said = match fetch_lyrics().ok().flatten() {
+        Some(said) if said["error"].as_bool() == Some(true) => {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            fetch_lyrics().ok().flatten().filter(|said| said["error"].as_bool() != Some(true))
         }
+        other => other,
     };
-    let Some(xml) = xml else { return Ok(None) };
-    let lines = ttml(&xml);
-    Ok((!lines.is_empty()).then_some(lines))
+    let xml = said.and_then(|said| said["content"].as_str().map(str::to_string));
+    if let Some(xml) = xml {
+        let lines = ttml(&xml);
+        if !lines.is_empty() {
+            return Ok(Some(lines));
+        }
+    }
+    // (Where PaxSenix has no lyrics of Apple's song or its service is busy: dive down to NetEase Cloud Music,
+    // asked with the canonical title and artist resolved from Apple Music's catalog in the chosen region.)
+    let canonical = Track {
+        title: song.title,
+        artist: song.artist,
+        seconds: song.duration.round() as u32,
+        album: track.album.clone(),
+        netease: None,
+        qq_music: false,
+    };
+    if let Ok(Some(id)) = netease_search(&canonical) {
+        if let Some(lines) = netease_by_number(id) {
+            return Ok(Some(lines));
+        }
+    }
+    Ok(None)
 }
 
 /// The song of Apple's catalog that `track` is, in its store `storefront` (its pages in `language`): of those
@@ -548,7 +581,7 @@ fn apple_music(track: &Track) -> Answer<Vec<Line>> {
 /// as Apple's own data is exact; within two seconds where none is so close (a live or alternate version close
 /// enough). Asked as the web player asks, with the token of the player (see `webplay_token`), taken again once
 /// where it no longer works.
-fn apple_song(track: &Track, storefront: &str, language: &str) -> Result<Option<(String, f64)>, Unreached> {
+fn apple_song(track: &Track, storefront: &str, language: &str) -> Result<Option<AppleSong>, Unreached> {
     let token = webplay_token()?;
     let searched = |token: &str| {
         let bearer = format!("Bearer {token}");
@@ -573,22 +606,25 @@ fn apple_song(track: &Track, storefront: &str, language: &str) -> Result<Option<
     }
     let said: serde_json::Value = serde_json::from_slice(&body).map_err(|_| Unreached)?;
     let length = f64::from(track.seconds);
-    let of = |song: &serde_json::Value| -> Option<(String, f64)> {
+    let of = |song: &serde_json::Value| -> Option<AppleSong> {
         let said = &song["attributes"];
         let name = said["name"].as_str()?;
         if !same(name, &track.title) && !same(title_bare(name), title_bare(&track.title)) {
             return None;
         }
-        if !by_artist(artists_in(said["artistName"].as_str()?), &track.artist) {
+        let artist_name = said["artistName"].as_str()?;
+        if !by_artist(artists_in(artist_name), &track.artist) {
             return None;
         }
-        Some((song["id"].as_str()?.to_string(), said["durationInMillis"].as_f64()? / 1000.0))
+        Some(AppleSong {
+            id: song["id"].as_str()?.to_string(),
+            duration: said["durationInMillis"].as_f64()? / 1000.0,
+            title: name.to_string(),
+            artist: artist_name.to_string(),
+        })
     };
     let songs: Vec<_> = said["resources"]["songs"].as_object().into_iter().flatten().filter_map(|(_, song)| of(song)).collect();
-    let best = songs.iter().min_by(|a, b| (a.1 - length).abs().total_cmp(&(b.1 - length).abs()));
-    Ok(best.filter(|(_, secs)| (secs - length).abs() <= 0.3)
-        .or_else(|| best.filter(|(_, secs)| (secs - length).abs() <= 2.0))
-        .map(|(id, secs)| (id.clone(), *secs)))
+    Ok(songs.into_iter().min_by(|a, b| (a.duration - length).abs().total_cmp(&(b.duration - length).abs())).filter(|s| (s.duration - length).abs() <= 2.0))
 }
 
 /// Apple Music's web player's token, as its page asks its catalog for songs with (a bearer token of the page
@@ -1472,6 +1508,16 @@ mod tests {
         let sung = lines.iter().find(|line| line.text.contains("I'm in love with the shape of you")).expect("the line");
         assert!(sung.words.len() > 3, "{sung:?}");
         println!("{} lines, {:?}", lines.len(), sung);
+    }
+    /// Apple Music's lyrics: where PaxSenix has none or is busy, dived down to NetEase Cloud Music with the
+    /// canonical title and artist resolved from Apple's catalog in the preferred region.
+    #[test]
+    #[ignore = "asks Apple Music and NetEase on the network"]
+    fn apple_music_dives_to_netease_on_luosu() {
+        let track = Track { netease: None, qq_music: false, title: "落俗".into(), artist: "李荣浩 — 李榮浩".into(), album: String::new(), seconds: 267 };
+        let lines = apple_music(&track).ok().flatten().expect("Apple Music or NetEase dive yielded lyrics");
+        println!("Yielded {} lines (worded: {})", lines.len(), lines.iter().any(|l| !l.words.is_empty()));
+        assert!(!lines.is_empty());
     }
     #[test]
     #[ignore = "asks Apple Music on the network"]
