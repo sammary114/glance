@@ -457,14 +457,39 @@ static WEBPLAY: Mutex<Option<(String, u64)>> = Mutex::new(None);
 /// only the token has run out (the script is the same one, its token refreshed within it).
 static SCRIPT: Mutex<Option<String>> = Mutex::new(None);
 
+/// The storefront of Apple's catalog most likely to name `track` as its player does (its native land:
+/// Japan for Japanese kana, China for Chinese hanzi, America for Western Latin and the like), and the two
+/// asked only where that first has no match.
+fn apple_storefronts(track: &Track) -> [(&'static str, &'static str); 3] {
+    let text = format!("{} {}", track.title, track.artist);
+    if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}')) {
+        [("jp", "ja"), ("cn", "zh-Hans"), ("us", "en-US")]
+    } else if text.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}')) {
+        [("cn", "zh-Hans"), ("us", "en-US"), ("jp", "ja")]
+    } else {
+        [("us", "en-US"), ("cn", "zh-Hans"), ("jp", "ja")]
+    }
+}
+
+/// A title with its trailing remarks (" (feat. …)", " - Single", " (Remastered)") cut off.
+fn title_bare(title: &str) -> &str {
+    for mark in [" - Single", " (feat.", " [feat.", " (Bonus", " [Bonus", " (Remaster", " [Remaster"] {
+        if let Some(at) = title.find(mark) {
+            return title[..at].trim();
+        }
+    }
+    title
+}
+
 /// Apple Music's lyrics of `track` (as Apple itself writes them, TTML — see `ttml`): the song of its catalog
-/// found for the track — its American store asked first, its Chinese and Japanese stores asked together only
-/// where America's has no match (a track of one land's catalog alone is found where it is, and the common case
-/// spares two stores a search) — and its lyrics asked of PaxSenix's service by the song's number, which asks
-/// Apple for them as the web player does (no sign-in to any of it). None where the song is not Apple's.
+/// found for the track — the store of its native land asked first, the other two asked together only where that
+/// has no match (sparing two stores a search in the common case) — and its lyrics asked of PaxSenix's service by
+/// the song's number, which asks Apple for them as the web player does (no sign-in to any of it). None where the
+/// song is not Apple's.
 fn apple_music(track: &Track) -> Answer<Vec<Line>> {
-    // (America's store first: most tracks are there; the others spared where it matches.)
-    let (id, unreached_us) = match apple_song(track, "us", "en-US") {
+    let [first, second, third] = apple_storefronts(track);
+    // (The store of the track's script first: most tracks match where they were written; the others spared.)
+    let (id, unreached_first) = match apple_song(track, first.0, first.1) {
         Ok(Some((id, _))) => (Some(id), false),
         Ok(None) => (None, false),
         Err(Unreached) => (None, true),
@@ -472,16 +497,16 @@ fn apple_music(track: &Track) -> Answer<Vec<Line>> {
     let id = match id {
         Some(id) => id,
         None => {
-            // (China and Japan together: each waits only for itself.)
-            let (cn, jp) = std::thread::scope(|scope| {
-                let jp = scope.spawn(|| apple_song(track, "jp", "ja"));
-                let cn = apple_song(track, "cn", "zh-Hans");
-                (cn, jp.join().unwrap_or(Err(Unreached)))
+            // (The other two stores together: each waits only for itself.)
+            let (two, three) = std::thread::scope(|scope| {
+                let three = scope.spawn(|| apple_song(track, third.0, third.1));
+                let two = apple_song(track, second.0, second.1);
+                (two, three.join().unwrap_or(Err(Unreached)))
             });
             let length = f64::from(track.seconds);
             let mut candidates: Vec<(String, f64)> = Vec::new();
-            let mut unreached = unreached_us;
-            for answer in [cn, jp] {
+            let mut unreached = unreached_first;
+            for answer in [two, three] {
                 match answer {
                     Ok(Some(song)) => candidates.push(song),
                     Ok(None) => {}
@@ -550,7 +575,8 @@ fn apple_song(track: &Track, storefront: &str, language: &str) -> Result<Option<
     let length = f64::from(track.seconds);
     let of = |song: &serde_json::Value| -> Option<(String, f64)> {
         let said = &song["attributes"];
-        if !same(said["name"].as_str()?, &track.title) {
+        let name = said["name"].as_str()?;
+        if !same(name, &track.title) && !same(title_bare(name), title_bare(&track.title)) {
             return None;
         }
         if !by_artist(artists_in(said["artistName"].as_str()?), &track.artist) {
