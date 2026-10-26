@@ -2349,8 +2349,8 @@ impl Ui {
                 }
                 rows.push(Row::Note(pick(
                     self.lang,
-                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
-                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position.",
+                    "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗、LRCLIB 或 Apple Music（经其服务 PaxSenix）。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
+                    "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou, LRCLIB or Apple Music (through its service PaxSenix). A local track uses the lyrics in its file first. Synced lyrics need the player to report its position.",
                 )));
             }
             (Page::Phone, _) => self.remote_rows(&mut rows),
@@ -3786,8 +3786,8 @@ impl Ui {
             "lyrics" => (
                 p("音乐", "Music"),
                 Some(p(
-                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗或 LRCLIB，本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
-                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
+                    "正在播放的歌曲：封面、播放进度、播放控制、音量，以及随播放滚动的歌词。查找歌词时会把歌名发给网易云音乐、QQ 音乐、酷狗、LRCLIB 或 Apple Music（经其服务 PaxSenix），本地歌曲先使用文件自带的歌词。歌词需要播放器提供播放进度（网易云音乐需要 InfLink-rs 插件）",
+                    "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou, LRCLIB or Apple Music (through its service PaxSenix). A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )),
             ),
             "notes" => (p("便签", "Notes"), Some(p("想法与待办，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and to-dos, each kept as a Markdown file, which can be put on the desktop"))),
